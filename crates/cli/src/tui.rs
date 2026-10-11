@@ -42,9 +42,20 @@ pub fn run(launch: Launch) -> Result<()> {
     Err(error).with_context(|| format!("running {}", app.path().display()))
 }
 
-#[cfg(not(unix))]
-pub fn run(_launch: Launch) -> Result<()> {
-    anyhow::bail!("--tui is only supported on Unix")
+#[cfg(windows)]
+pub fn run(launch: Launch) -> Result<()> {
+    use crate::{Detect, InstalledApp as _};
+    use anyhow::Context as _;
+
+    let app = Detect::detect(launch.zed.as_deref()).context("Bundle detection")?;
+    // The console CLI must wait for the GUI-subsystem executable, or the shell
+    // starts reading terminal input while the TUI is still attached.
+    let status = std::process::Command::new(app.path())
+        .args(launch.arguments)
+        .env("ZED_TUI_ATTACH_CONSOLE", "1")
+        .status()
+        .with_context(|| format!("running {}", app.path().display()))?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 #[cfg(test)]

@@ -1,27 +1,30 @@
-#[cfg(unix)]
+#[cfg(windows)]
+mod windows_console;
+
+#[cfg(any(unix, windows))]
 mod client;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod frame_diff;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod icon_glyphs;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod input;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod protocol;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod server;
-#[cfg(all(unix, test))]
+#[cfg(all(any(unix, windows), test))]
 mod test_support;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod title_bar;
 
-#[cfg(unix)]
-pub use unix::*;
+#[cfg(any(unix, windows))]
+pub use native::*;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub use stubs::*;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 mod stubs {
     use gpui::{App, Application};
 
@@ -58,8 +61,8 @@ mod stubs {
     }
 }
 
-#[cfg(unix)]
-mod unix {
+#[cfg(any(unix, windows))]
+mod native {
     use std::{
         cell::RefCell,
         ffi::OsString,
