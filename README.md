@@ -23,6 +23,46 @@ Other platforms are not yet available:
 - [Building Zed for Linux](./docs/src/development/linux.md)
 - [Building Zed for Windows](./docs/src/development/windows.md)
 
+### Windows native TUI
+
+The terminal frontend can be built as native Windows executables. Use Windows
+Terminal on Windows 10 or Windows 11, and install the
+[Windows build dependencies](./docs/src/development/windows.md).
+
+From a Visual Studio developer PowerShell, in this checkout:
+
+```powershell
+.\script\zed-tui-install.ps1 -Build
+& "$env:LOCALAPPDATA\zed-tui\bin\zed-tui.cmd" .
+```
+
+The installer copies the editor as `zed.exe` and the console launcher as
+`bin\zed.exe` under `%LOCALAPPDATA%\zed-tui`. Add its `bin` directory to your user `PATH` to use
+`zed-tui` directly. To run a development build without installing:
+
+```powershell
+cargo build -p zed -p cli
+.\target\debug\cli.exe --tui .
+```
+
+Use the console launcher so PowerShell waits while the editor owns terminal
+input. `Ctrl+\`, then `d`, detaches; `zed-tui attach` reconnects. `zed-tui ls`,
+`zed-tui kill`, `--session NAME`, and `--wait FILE` use the same session model as
+Unix. Sessions and logs are under Zed's data directory in `tui\<channel>`.
+Windows uses local AF_UNIX sockets and UTF-16 path metadata; it does not need WSL.
+If a long profile or custom data directory exceeds the Windows socket path
+limit, use a shorter local `--user-data-dir` for all commands in that session.
+Windows console input uses native key, mouse, and resize events; terminal palette
+and enhanced keyboard capability queries are disabled on this platform.
+
+To validate a native build:
+
+```powershell
+cargo test --locked -p gpui_tui
+cargo test --locked -p cli tui::tests
+cargo test --locked -p zed --bin zed tui
+```
+
 ### Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
