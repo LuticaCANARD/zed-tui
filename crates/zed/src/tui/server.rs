@@ -1472,6 +1472,52 @@ mod tests {
         assert_eq!(read_root(&session_paths).as_deref(), Some(root));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_session_roots_preserve_non_unicode_paths() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let session_paths = SessionPaths::in_directory("wide", directory.path().to_path_buf());
+        let mut wide = r"C:\work\".encode_utf16().collect::<Vec<_>>();
+        wide.push(0xd800);
+        let root = PathBuf::from(OsString::from_wide(&wide));
+        write_root(&session_paths, &root)?;
+        assert_eq!(read_root(&session_paths), Some(root));
+
+        fs::write(&session_paths.root, [0x61])?;
+        assert_eq!(read_root(&session_paths), None);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_socket_paths_do_not_grow_with_session_names() {
+        let directory = Path::new(r"C:\Users\developer\AppData\Local\Zed\tui\dev");
+        let first = SessionPaths::in_directory("first", directory.join("a".repeat(120)));
+        let second = SessionPaths::in_directory("second", directory.join("b".repeat(120)));
+        assert!(first.socket.as_os_str().len() < 108);
+        assert_eq!(first.socket.parent(), Some(directory));
+        assert_ne!(first.socket, second.socket);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_urls_preserve_drive_letters_and_unicode() -> Result<()> {
+        let paths = [
+            PathBuf::from(r"C:\work\한글 repo\percent%41.txt"),
+            PathBuf::from(r"C:\work\hash#1.txt"),
+            PathBuf::from(r"\\server\share\with space.txt"),
+        ];
+        let urls = file_urls(&paths);
+        assert_eq!(urls.len(), paths.len());
+        for (url, expected) in urls.iter().zip(paths) {
+            let actual = url::Url::parse(url)?
+                .to_file_path()
+                .map_err(|()| anyhow!("invalid file URL: {url}"))?;
+            assert_eq!(actual, expected);
+        }
+        Ok(())
+    }
+
     #[test]
     fn an_open_and_wait_after_hello_reports_the_client_id() {
         let hub = Arc::new(ClientHub::default());
