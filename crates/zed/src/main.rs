@@ -211,6 +211,26 @@ fn main() {
     #[cfg(unix)]
     util::prevent_root_execution();
 
+    #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--tui"))
+        && (std::env::var_os("ZED_TUI_SESSION").is_none()
+            || std::env::var_os("ZED_TUI_ATTACH_CONSOLE").is_some())
+    {
+        // Release builds use the GUI subsystem, so attach before parsing TUI
+        // commands, including help and commands that exit without starting Zed.
+        unsafe {
+            use windows::Win32::{
+                Foundation::ERROR_ACCESS_DENIED,
+                System::Console::{ATTACH_PARENT_PROCESS, AttachConsole},
+            };
+            if let Err(error) = AttachConsole(ATTACH_PARENT_PROCESS)
+                && error.code() != ERROR_ACCESS_DENIED.to_hresult()
+            {
+                log::debug!("could not attach the parent console: {error}");
+            }
+        }
+    }
+
     let (tui_server, tui_startup) = tui::start().unzip();
     let args = tui_server.as_ref().map_or_else(Args::parse, |tui_server| {
         Args::parse_from(tui_server.zed_args())

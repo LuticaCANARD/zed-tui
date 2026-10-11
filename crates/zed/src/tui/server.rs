@@ -1,14 +1,20 @@
+#[cfg(unix)]
+use std::os::unix::{
+    ffi::{OsStrExt as _, OsStringExt as _},
+    fs::{DirBuilderExt as _, PermissionsExt as _},
+    net::{UnixListener, UnixStream},
+};
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+#[cfg(windows)]
+use uds_windows::{UnixListener, UnixStream};
+
 use std::{
     cell::RefCell,
     ffi::OsString,
     fs,
     io::{BufReader, ErrorKind, Write as _},
     net::Shutdown,
-    os::unix::{
-        ffi::{OsStrExt as _, OsStringExt as _},
-        fs::{DirBuilderExt as _, PermissionsExt as _},
-        net::{UnixListener, UnixStream},
-    },
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -84,13 +90,32 @@ impl SessionPaths {
         if !is_valid {
             bail!("invalid session name {session:?}: use letters, digits, '-', '_' and '.'");
         }
-        Ok(Self::in_directory(session, sessions_dir().join(session)))
+        let paths = Self::in_directory(session, sessions_dir().join(session));
+        #[cfg(windows)]
+        anyhow::ensure!(
+            paths.socket.to_str().is_some_and(|path| path.len() < 108),
+            "the Windows session socket path is too long or is not Unicode: {}; use --user-data-dir with a shorter local path",
+            paths.socket.display()
+        );
+        Ok(paths)
     }
 
     fn in_directory(name: &str, directory: PathBuf) -> Self {
         Self {
             name: name.to_owned(),
-            socket: directory.join("server.sock"),
+            socket: {
+                #[cfg(unix)]
+                let socket = directory.join("server.sock");
+                // Winsock limits Unix socket paths to 107 UTF-8 bytes. Keep the
+                // endpoint outside the user-supplied session basename.
+                #[cfg(windows)]
+                let socket = util::paths::SanitizedPath::new(
+                    &directory
+                        .with_file_name(format!("{:016x}.sock", fnv1a(&path_bytes(&directory)))),
+                )
+                .to_path_buf();
+                socket
+            },
             pid: directory.join("server.pid"),
             log: directory.join("server.log"),
             root: directory.join("root"),
@@ -148,10 +173,7 @@ pub fn session_name_for_root(root: &Path) -> String {
     } else {
         &basename
     };
-    format!(
-        "{basename}-{:08x}",
-        fnv1a(root.as_os_str().as_bytes()) as u32
-    )
+    format!("{basename}-{:08x}", fnv1a(&path_bytes(root)) as u32)
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -160,14 +182,41 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
+fn path_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(windows)]
+    {
+        path.as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+}
+
 fn write_root(session_paths: &SessionPaths, root: &Path) -> Result<()> {
-    fs::write(&session_paths.root, root.as_os_str().as_bytes())
+    fs::write(&session_paths.root, path_bytes(root))
         .with_context(|| format!("writing {}", session_paths.root.display()))
 }
 
 pub fn read_root(session_paths: &SessionPaths) -> Option<PathBuf> {
     let bytes = fs::read(&session_paths.root).ok()?;
-    Some(PathBuf::from(OsString::from_vec(bytes)))
+    #[cfg(unix)]
+    let root = OsString::from_vec(bytes);
+    #[cfg(windows)]
+    let root = {
+        if !bytes.len().is_multiple_of(2) {
+            return None;
+        }
+        let wide = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        OsString::from_wide(&wide)
+    };
+    Some(PathBuf::from(root))
 }
 
 pub fn deepest_covering<'a>(
@@ -193,13 +242,17 @@ fn sessions_dir() -> PathBuf {
 }
 
 fn create_private_dir(path: &Path) -> Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder
         .create(path)
         .with_context(|| format!("creating {}", path.display()))?;
+    #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("restricting {}", path.display()))
+        .with_context(|| format!("restricting {}", path.display()))?;
+    Ok(())
 }
 
 pub fn is_running(paths: &SessionPaths) -> bool {
@@ -944,7 +997,8 @@ pub fn spawn_daemon(
         .arg(root)
         .arg(root)
         .args(paths_to_open)
-        .env(SESSION_ENV, &session_paths.name);
+        .env(SESSION_ENV, &session_paths.name)
+        .env_remove("ZED_TUI_ATTACH_CONSOLE");
     util::set_pre_exec_to_start_new_session(&mut command);
     let mut child = smol::process::Command::from(command)
         .stdin(smol::process::Stdio::null())
@@ -998,6 +1052,9 @@ pub fn list() -> Result<Vec<RunningSession>> {
     };
     for entry in entries {
         let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
         let Ok(session_paths) = SessionPaths::new(&name) else {
             continue;
@@ -1092,6 +1149,7 @@ mod tests {
         assert!(matches!(reply, ServerMessage::Error(error) if error.contains("zed --tui kill")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn session_directories_are_private_even_if_they_existed() {
         let directory = tempfile::tempdir().unwrap();
@@ -1294,6 +1352,7 @@ mod tests {
         assert_eq!(message, ServerMessage::Shutdown);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn opened_paths_keep_url_metacharacters(cx: &mut gpui::TestAppContext) {
         let paths = [
@@ -1344,6 +1403,7 @@ mod tests {
         assert_eq!(session_root_for(&plain), plain);
     }
 
+    #[cfg(unix)]
     #[test]
     fn targets_resolve_symlinks_and_missing_files_through_their_parent() {
         let directory = tempfile::tempdir().unwrap();
@@ -1365,6 +1425,7 @@ mod tests {
 
     #[test]
     fn session_names_from_roots_are_valid_stable_and_distinct() {
+        #[cfg(unix)]
         assert_eq!(
             session_name_for_root(Path::new("/work/zed")),
             "zed-a5a7578b"
@@ -1409,6 +1470,52 @@ mod tests {
         let root = Path::new("/work/한글 repo");
         write_root(&session_paths, root).unwrap();
         assert_eq!(read_root(&session_paths).as_deref(), Some(root));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_session_roots_preserve_non_unicode_paths() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let session_paths = SessionPaths::in_directory("wide", directory.path().to_path_buf());
+        let mut wide = r"C:\work\".encode_utf16().collect::<Vec<_>>();
+        wide.push(0xd800);
+        let root = PathBuf::from(OsString::from_wide(&wide));
+        write_root(&session_paths, &root)?;
+        assert_eq!(read_root(&session_paths), Some(root));
+
+        fs::write(&session_paths.root, [0x61])?;
+        assert_eq!(read_root(&session_paths), None);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_socket_paths_do_not_grow_with_session_names() {
+        let directory = Path::new(r"C:\Users\developer\AppData\Local\Zed\tui\dev");
+        let first = SessionPaths::in_directory("first", directory.join("a".repeat(120)));
+        let second = SessionPaths::in_directory("second", directory.join("b".repeat(120)));
+        assert!(first.socket.as_os_str().len() < 108);
+        assert_eq!(first.socket.parent(), Some(directory));
+        assert_ne!(first.socket, second.socket);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_urls_preserve_drive_letters_and_unicode() -> Result<()> {
+        let paths = [
+            PathBuf::from(r"C:\work\한글 repo\percent%41.txt"),
+            PathBuf::from(r"C:\work\hash#1.txt"),
+            PathBuf::from(r"\\server\share\with space.txt"),
+        ];
+        let urls = file_urls(&paths);
+        assert_eq!(urls.len(), paths.len());
+        for (url, expected) in urls.iter().zip(paths) {
+            let actual = url::Url::parse(url)?
+                .to_file_path()
+                .map_err(|()| anyhow!("invalid file URL: {url}"))?;
+            assert_eq!(actual, expected);
+        }
+        Ok(())
     }
 
     #[test]
